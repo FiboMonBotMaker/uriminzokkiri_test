@@ -1,0 +1,4 @@
+py-cord[speed] == 2.0.1
+py-cord[voice] == 2.0.1
+pyyaml == 6.0
+aiofiles
