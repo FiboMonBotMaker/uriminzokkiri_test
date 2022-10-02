@@ -1,31 +1,51 @@
-from discord.ext import commands
-from discord.ui import View, button, Button
-from discord import Option, OptionChoice, SlashCommandGroup, Interaction, ApplicationContext, Permissions, FFmpegPCMAudio, PCMVolumeTransformer, SelectOption
+from datetime import time
+from math import ceil
+from discord.ext import commands, tasks
+from discord.ui import View, button, Button, Modal, InputText, Select
+from discord import Option, OptionChoice, Embed, Color, SlashCommandGroup, Interaction, ApplicationContext, Permissions, FFmpegPCMAudio, PCMVolumeTransformer, SelectOption
 from lib import uriminzokkiri as uz
 import asyncio
 import aiohttp
 import aiofiles
 from typing import List
-from discord import Interaction, ButtonStyle, Embed, Color, SelectOption, Interaction, FFmpegPCMAudio, PCMVolumeTransformer
-from discord.ui import Button, View, button, Select
-from discord.ui import View, button, Button, Modal, InputText
-import aiohttp
 
 
 class QuickPushQuiz(commands.Cog):
     def __init__(self, bot) -> None:
         self.bot = bot
+        self.update.start()
 
-    # 北の国の音楽を検索します
+    async def update_music_overviews(self):
+        print("update")
+        self.music_overviews = await uz.search(skey="", lang="kor")
+        self.amo_of_songs = len(self.music_overviews)
+        self.num_of_pages = ceil(self.amo_of_songs/25)
+        print(f"musics{self.amo_of_songs} pages{self.num_of_pages}")
+
+        # 北の国の音楽を検索します
     music_command = SlashCommandGroup(
         name="k_music",
         description="北の音楽を聴くためのBOT"
     )
 
+    setup_command = SlashCommandGroup(
+        name="setup",
+        description="スタティックな位置に配置するためのあれ",
+        default_permissions=Permissions(administrator=True)
+    )
+
+    @setup_command.command(name="channel", description="呼び出したチャンネルに再生ボタンを固定します")
+    async def channel(self, ctx: ApplicationContext):
+        await ctx.response.send_message(content="Set up channel", ephemeral=True)
+        embed = Embed(
+            title=f"Pages 1/{self.num_of_pages}", color=Color.brand_red())
+        for i in range(0, 25 if self.num_of_pages > 25 else len(self.num_of_pages)):
+            m = self.music_overviews[i]
+            embed.add_field(name=m.title, value=f"NO:{m.no}\n{m.sub_title}")
+        await ctx.channel.send(embed=embed, view=BaseView(music_overviews=self.music_overviews))
     # playlist_command = music_command.subcommands(
     #     name="playlist",
     #     description="プレイリストを作ったりなんだり"
-
     # )
 
     @music_command.command(name="search", description="ワード検索")
@@ -45,10 +65,6 @@ class QuickPushQuiz(commands.Cog):
                 ],
             )
     ):
-        global vc
-        vc = ctx.voice_client
-        if not vc:
-            vc = await ctx.author.voice.channel.connect()
 
         word: str = word
         musiclist = await uz.search(skey=word, lang=lang)
@@ -59,18 +75,29 @@ class QuickPushQuiz(commands.Cog):
 
         await ctx.interaction.response.send_message(content="player set", view=BaseView(music_overviews=musiclist))
 
-    # @playlist_command.command(name="add", description="プレイリストに音楽を追加します")
-    # async def search(
-    #     self,
-    #     ctx: ApplicationContext,
-    #     no: Option(int, description="いろんな言語で検索できます"),
-    # ):
+    @tasks.loop(time=[time(hour=h) for h in range(24)])
+    async def update(self):
+        await self.update_music_overviews()
+
+    @update.before_loop
+    async def update_init(self):
+        print("start")
+        await self.update_music_overviews()
+
+        # @playlist_command.command(name="add", description="プレイリストに音楽を追加します")
+        # async def search(
+        #     self,
+        #     ctx: ApplicationContext,
+        #     no: Option(int, description="いろんな言語で検索できます"),
+        # ):
 
 
 class BaseView(View):
     def __init__(self, music_overviews: List[uz.MusicOverview]):
         super().__init__(timeout=None)
         self.music_overviews = music_overviews
+        self.amo_of_songs = len(self.music_overviews)
+        self.num_of_pages = ceil(self.amo_of_songs/25)
         self.index = 0
 
         self.add_item(
@@ -80,25 +107,70 @@ class BaseView(View):
                     for i, v in enumerate(
                         self.music_overviews[
                             self.index*25:
-                                ((self.index+1)*25)-1
+                                ((self.index+1)*25)
                                 if len(self.music_overviews) >= (self.index+1)*25
-                                else len(self.music_overviews)-1
+                                else len(self.music_overviews)
                         ]
                     )
                 ]
             )
         )
+        self.now_select = self.children[-1]
 
-    @button(label="検索", row=4)
+    @button(label="検索", row=2)
     async def re_search(self, _: Button, interaction: Interaction):
         await interaction.response.send_modal(modal=ReSearchModal())
 
-    @button(label="とじる", row=4)
-    async def hoge(self, button: Button, interaction: Interaction):
-        button.disabled = True
-        await interaction.response.edit_message(content="Bye", view=self)
-        await interaction.delete_original_message(delay=5)
-        await vc.disconnect()
+    @button(label="PREV", row=3)
+    async def prev(self, button: Button, interaction: Interaction):
+        self.index -= 1
+        music = [v for v in self.music_overviews]
+        embed = Embed(title="music list", color=Color.brand_red())
+        for v in music:
+            embed.add_field(name=v.title, value=f"NO:{v.no}\n{v.sub_title}")
+        self.remove_item(MusicSelecter)
+        self.add_item(
+            MusicSelecter(
+                [
+                    SelectOption(label=v.title, value=str(i+(25*self.index)))
+                    for i, v in enumerate(music)
+                ]
+            )
+        )
+
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @button(label="NEXT", row=3)
+    async def next(self, button: Button, interaction: Interaction):
+        self.index += 1
+        music = [v for v in self.music_overviews[self.index*25:((self.index+1)*25)
+                                                 if len(self.music_overviews) >= (self.index+1)*25
+                                                 else len(self.music_overviews)]]
+        embed = Embed(
+            title=f"Pages {self.index+1}/{self.num_of_pages}", color=Color.brand_red())
+        for v in music:
+            embed.add_field(name=v.title, value=f"NO:{v.no}\n{v.sub_title}")
+        self.remove_item(self.now_select)
+        self.add_item(
+            MusicSelecter(
+                [
+                    SelectOption(label=v.title[0:100 if len(v.title) > 100 else len(
+                        v.title)], value=str(i+(25*self.index)))
+                    for i, v in enumerate(music)
+                ]
+            )
+        )
+        self.now_select = self.children[-1]
+
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @button(label="EXIT", row=4)
+    async def exit(self, button: Button, interaction: Interaction):
+        self.index += 1
+        await interaction.response.edit_message(content="STOP MUSIC", view=self)
+        vc = interaction.guild.voice_client
+        if vc:
+            await vc.disconnect()
 
 
 class ReSearchModal(Modal):
@@ -117,6 +189,8 @@ class ReSearchModal(Modal):
         if len(music_overviews) == 0:
             await interaction.response.send_message(content=f"{word}はみつかんないでした")
             return
+        for f in asyncio.as_completed([v.get_music() for v in music_overviews]):
+            await f
         await interaction.response.send_message(view=BaseView(music_overviews=music_overviews))
 
 
@@ -125,9 +199,13 @@ class MusicSelecter(Select["BaseView"]):
         super().__init__(placeholder="再生する音楽を選択してください", options=options,)
 
     async def callback(self, interaction: Interaction):
+        vc = interaction.guild.voice_client
+        if not vc:
+            vc = await interaction.user.voice.channel.connect(timeout=10)
+
         view: BaseView = self.view
         music = view.music_overviews[int(self.values[0])]
-        await interaction.response.send_message(content=f"Play -> **{music.title}**")
+        await interaction.response.edit_message(content=f"Play -> **{music.title}**")
         m = await music.get_music()
         vc.stop()
         async with aiohttp.ClientSession() as session:
